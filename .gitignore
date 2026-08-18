@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+position.json
+layout.json
+*.tmp
+widget.log
+saida.json
