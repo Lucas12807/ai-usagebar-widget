@@ -164,6 +164,7 @@ def _looks_unconfigured(error_msg):
 _SHORT_LABELS = {
     ("anthropic", "Session (5h)"): "Claude 5h",
     ("anthropic", "Weekly (7d)"): "Claude semanal",
+    ("deepseek", "Balance"): "DeepSeek",
 }
 
 
