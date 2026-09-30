@@ -12,7 +12,8 @@ pessoa só configurar o Claude, só o bloco do Claude aparece; se configurar
 provedor novo é mexer só no `config.toml` do `ai-usagebar` — nunca neste
 arquivo.
 
-Formato esperado de `ai-usagebar usage --json`:
+Schema real confirmado em 2026-08-18 (via SSH, na máquina Windows do
+usuário, com Claude e DeepSeek autenticados de verdade):
 
     {"entries": [
         {"id": "anthropic", "display_name": "Claude", "status": "ready",
@@ -31,11 +32,11 @@ Formato esperado de `ai-usagebar usage --json`:
         ...
     ], "primary": null}
 
-Dois formatos de item dentro de `sections`:
-  - `type: "metric"` (ex. Claude): já vem com `percent` numérico e
-    `reset_at` ISO — usado direto, sem parsing de texto.
-  - `type: "text"` (ex. DeepSeek): só um `value` em texto livre (ex.
-    "$8.84"), sem percent — mostrado como está.
+Dois formatos de item dentro de `sections` observados até agora:
+  - `type: "metric"` (Claude): já vem com `percent` numérico e `reset_at`
+    ISO — usado direto, sem parsing de texto.
+  - `type: "text"` (DeepSeek): só um `value` em texto livre (ex. "$8.84"),
+    sem percent — mostrado como está.
 Provedores novos podem usar um desses dois formatos ou algo parecido; o
 parser tenta ambos antes de desistir de um item.
 
@@ -49,6 +50,7 @@ com problema de verdade (token expirado, rede, etc).
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -81,6 +83,16 @@ _UNCONFIGURED_HINTS = [
 ]
 
 
+def _env_with_agy():
+    """PATH com a pasta do agy: o widget sobe no logon e herda um PATH antigo,
+    e o ai-usagebar precisa achar o agy pra renovar a sessão do Antigravity."""
+    env = dict(os.environ)
+    agy_dir = os.path.join(os.environ.get("LOCALAPPDATA", ""), "agy", "bin")
+    if os.path.isdir(agy_dir):
+        env["PATH"] = env.get("PATH", "") + os.pathsep + agy_dir
+    return env
+
+
 def fetch_raw_json():
     """Roda `ai-usagebar usage --json` e devolve o dict do JSON."""
     exe = shutil.which(AI_USAGEBAR_BIN) or AI_USAGEBAR_BIN
@@ -88,11 +100,14 @@ def fetch_raw_json():
         [exe, "usage", "--json"],
         capture_output=True,
         text=True,
-        encoding="utf-8",  # o ai-usagebar sempre imprime UTF-8; sem isso o
-        errors="replace",  # Windows decodifica na codepage do console e corrompe acentos
-        timeout=15,
-        # Evita a janela de console que o Windows abriria ao rodar o
-        # subprocess, mesmo com o widget executando via pythonw.exe.
+        encoding="utf-8",  # o ai-usagebar sempre imprime UTF-8; sem isso, no
+        errors="replace",  # Windows o Python decodifica na codepage do console
+        # (cp1252/850) e corrompe acentos ("não" -> "n�o")
+        timeout=40,  # renovar a sessão do Antigravity (agy models) pode levar ~25s
+        env=_env_with_agy(),
+        # Sem isso, o Windows abre uma janela de console (visível por uma
+        # fração de segundo) toda vez que o subprocess roda, mesmo com o
+        # widget sendo executado via pythonw.exe (sem console próprio).
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     # `usage` sai com exit code != 0 se QUALQUER vendor configurado falhar
@@ -145,10 +160,26 @@ def _looks_unconfigured(error_msg):
     return any(hint in msg for hint in _UNCONFIGURED_HINTS)
 
 
+def _antigravity_gemini_blocks(entry):
+    """Antigravity: só os limites do Gemini (5h e semanal); ignora o grupo
+    Claude & GPT OSS e as linhas de cabeçalho/fonte de sections."""
+    blocks = []
+    for m in entry.get("metrics") or []:
+        if m.get("label") != "Gemini" or not isinstance(m.get("percent"), (int, float)):
+            continue
+        window = "5h" if m.get("window_secs") == 18000 else "semanal"
+        reset = _seconds_until(m.get("reset_at"))
+        text = f"{m['percent']}% · {format_seconds(reset)}" if reset is not None else f"{m['percent']}%"
+        blocks.append({"label": f"Gemini {window}", "value_text": text, "percent": m["percent"]})
+    return blocks
+
+
 def _blocks_from_entry(entry):
     """Monta 0+ blocos genéricos a partir de UMA entry pronta (status=ready).
     Cada item de `sections` que tiver um `label` reconhecível vira um bloco."""
     display_name = entry.get("display_name") or entry.get("id") or "?"
+    if entry.get("id") == "antigravity":
+        return _antigravity_gemini_blocks(entry)
     blocks = []
     for item in entry.get("sections") or []:
         label = item.get("label")
@@ -157,8 +188,12 @@ def _blocks_from_entry(entry):
 
         percent = item.get("percent")
         if percent is not None and not isinstance(percent, (int, float)):
-            # Ignora percent que não seja numérico — protege o cálculo de
-            # cor no widget.py contra um vendor mal comportado.
+            # Um `ai-usagebar` futuro (ou um vendor novo mal comportado)
+            # emitindo `"percent": "38"` (string) em vez de número faria
+            # `percent < 50` explodir lá no widget.py, dentro de um
+            # callback do Tk — a janela simplesmente para de redesenhar,
+            # sem nenhum erro visível. Tratar como "sem percentual" é
+            # barato e cobre toda essa superfície.
             percent = None
         if percent is not None:
             # Formato "metric" (visto no Claude): percent numérico + reset_at ISO.
