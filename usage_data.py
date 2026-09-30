@@ -65,8 +65,8 @@ AI_USAGEBAR_BIN = "ai-usagebar"
 POLL_INTERVAL_SECONDS = 60
 
 MOCK_BLOCKS = [
-    {"label": "Claude · Session (5h)", "value_text": "42% · 2h 13m", "percent": 42},
-    {"label": "Claude · Weekly (7d)", "value_text": "18% · 3d 4h", "percent": 18},
+    {"label": "Claude 5h", "value_text": "42% · 2h 13m", "percent": 42},
+    {"label": "Claude semanal", "value_text": "18% · 3d 4h", "percent": 18},
     {"label": "DeepSeek · Balance", "value_text": "$12.34", "percent": None},
 ]
 
@@ -160,6 +160,13 @@ def _looks_unconfigured(error_msg):
     return any(hint in msg for hint in _UNCONFIGURED_HINTS)
 
 
+# Rótulos curtos (mesmo padrão do Gemini) pra deixar os blocos do widget menores.
+_SHORT_LABELS = {
+    ("anthropic", "Session (5h)"): "Claude 5h",
+    ("anthropic", "Weekly (7d)"): "Claude semanal",
+}
+
+
 def _antigravity_gemini_blocks(entry):
     """Antigravity: só os limites do Gemini (5h e semanal); ignora o grupo
     Claude & GPT OSS e as linhas de cabeçalho/fonte de sections."""
@@ -208,7 +215,7 @@ def _blocks_from_entry(entry):
             continue  # item sem percent nem value (ex.: "block" com body) — ignora
 
         blocks.append({
-            "label": f"{display_name} · {label}",
+            "label": _SHORT_LABELS.get((entry.get("id"), label), f"{display_name} · {label}"),
             "value_text": value_text,
             "percent": percent,
         })
