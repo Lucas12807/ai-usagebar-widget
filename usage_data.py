@@ -50,6 +50,7 @@ com problema de verdade (token expirado, rede, etc).
 """
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -60,6 +61,12 @@ from datetime import datetime, timezone
 # Nome do binário. Se você não colocou no PATH, troque pelo caminho completo,
 # ex: r"C:\Users\SeuUsuario\.cargo\bin\ai-usagebar.exe"
 AI_USAGEBAR_BIN = "ai-usagebar"
+
+logger = logging.getLogger("ai_usagebar_widget")
+
+# Intervalo mínimo entre renovações do login do agy feitas pelo próprio widget.
+_AGY_RENEW_COOLDOWN = 300
+_last_agy_renew = 0.0
 
 # Quantos segundos entre uma consulta e outra.
 POLL_INTERVAL_SECONDS = 60
@@ -91,6 +98,48 @@ def _env_with_agy():
     if os.path.isdir(agy_dir):
         env["PATH"] = env.get("PATH", "") + os.pathsep + agy_dir
     return env
+
+
+def _antigravity_session_expired(raw):
+    """Login do Antigravity vencido: ou vem como erro ("session expired"), ou o
+    ai-usagebar devolve o último snapshot bom marcado `stale` (status ready,
+    sem erro) e os números ficam congelados sem ninguém perceber."""
+    for entry in raw.get("entries", []) or []:
+        if entry.get("id") != "antigravity":
+            continue
+        if entry.get("stale"):
+            return True
+        if entry.get("status") != "ready":
+            return "session expired" in (entry.get("error") or "").lower()
+    return False
+
+
+def _renew_agy_session():
+    """Roda `agy models` (leve, sem TTY, regrava o login salvo com token novo).
+    O ai-usagebar tenta o mesmo por conta própria, mas com espera de 10 min
+    entre tentativas e sem deixar rastro; aqui fica registrado no log."""
+    global _last_agy_renew
+    if time.time() - _last_agy_renew < _AGY_RENEW_COOLDOWN:
+        return False
+    _last_agy_renew = time.time()
+    agy = shutil.which("agy", path=_env_with_agy()["PATH"])
+    if not agy:
+        logger.warning("agy não encontrado; não deu pra renovar o login do Antigravity.")
+        return False
+    env = _env_with_agy()
+    env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
+    started = time.time()
+    try:
+        result = subprocess.run(
+            [agy, "models"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env=env, timeout=40,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        logger.info("agy models (renovação do login) saiu com %s em %.1fs.", result.returncode, time.time() - started)
+        return result.returncode == 0
+    except Exception:  # noqa: BLE001
+        logger.exception("Falha ao rodar agy models pra renovar o login do Antigravity.")
+        return False
 
 
 def fetch_raw_json():
@@ -193,6 +242,8 @@ def _blocks_from_entry(entry):
         label = item.get("label")
         if not label:
             continue  # spacers e afins não têm label
+        if label.startswith("HTTP "):
+            continue  # erro transitório da API (ex.: 429) vindo como "bloco"; não é métrica
 
         percent = item.get("percent")
         if percent is not None and not isinstance(percent, (int, float)):
@@ -249,6 +300,8 @@ def get_usage(mock=False):
         return {"blocks": blocks, "error": None}
     try:
         raw = fetch_raw_json()
+        if _antigravity_session_expired(raw) and _renew_agy_session():
+            raw = fetch_raw_json()
         blocks, errors = extract_blocks(raw)
         return {"blocks": blocks, "error": " | ".join(errors) if errors else None}
     except FileNotFoundError:
